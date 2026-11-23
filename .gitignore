@@ -1,2 +1,6 @@
 *.bin
 tokeniser
+gen
+generate
+test_loader
+train

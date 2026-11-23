@@ -50,6 +50,9 @@ private:
     // AdamW optimizer state buffers (1st and 2nd moments)
     std::vector<float> m_memory;
     std::vector<float> v_memory;
+    std::vector<uint8_t> dropout_masks; // Stores masks for emb + (attn + mlp) * L
+    std::mt19937 drop_rng{1337};
+
     int adam_step = 0;
 
     void allocate_activations(int B, int T) {
@@ -61,6 +64,8 @@ private:
         size_t NH = cfg.n_head;
         size_t C  = cfg.n_embd;
         size_t V  = cfg.vocab_size;
+        dropout_masks.resize((1 + 2 * L) * B * T * C);
+
 
         size_t sizes[23] = {
             (size_t)B * T * C,           // encoded
@@ -121,7 +126,7 @@ public:
     }
 
     // Forward Pass (pass targets = nullptr during inference/generation)
-    float forward(const uint16_t* inputs, const uint16_t* targets, int B, int T) {
+        float forward(const uint16_t* inputs, const uint16_t* targets, int B, int T, bool training = true) {
         allocate_activations(B, T);
 
         int L  = cfg.n_layer;
@@ -131,6 +136,10 @@ public:
 
         // 1. Token + Position Embeddings
         embedding_forward(acts.encoded, inputs, params.wte, params.wpe, B, T, C);
+        uint8_t* emb_mask = dropout_masks.data();
+        dropout_forward(acts.encoded, emb_mask, acts.encoded, B * T * C, cfg.dropout, training, drop_rng);
+
+
 
         // 2. Transformer Blocks (0 .. L-1)
         for (int l = 0; l < L; ++l) {
@@ -154,6 +163,10 @@ public:
             attention_forward(l_atty, l_preatt, l_att, l_qkv, B, T, C, NH);
             matmul_forward(l_attproj, l_atty, params.attprojw + l * C * C, params.attprojb + l * C, B, T, C, C);
 
+            uint8_t* att_mask = dropout_masks.data() + (1 + 2 * l) * B * T * C;
+            dropout_forward(l_attproj, att_mask, l_attproj, B * T * C, cfg.dropout, training, drop_rng);
+
+
             // Residual 2
             float* l_residual2 = acts.residual2 + l * B * T * C;
             residual_forward(l_residual2, residual, l_attproj, B * T * C);
@@ -174,6 +187,9 @@ public:
 
             // Residual 3
             float* l_residual3 = acts.residual3 + l * B * T * C;
+            uint8_t* mlp_mask = dropout_masks.data() + (1 + 2 * l + 1) * B * T * C;
+            dropout_forward(l_fcproj, mlp_mask, l_fcproj, B * T * C, cfg.dropout, training, drop_rng);
+
             residual_forward(l_residual3, l_residual2, l_fcproj, B * T * C);
         }
 
@@ -245,6 +261,11 @@ public:
 
             // Reverse Residual 3 & MLP
             residual_backward(dl_residual2, dl_fcproj, dl_residual3, B * T * C);
+            const uint8_t* mlp_mask = dropout_masks.data() + (1 + 2 * l + 1) * B * T * C;
+           // Apply mask in-place to dl_fcproj before matmul_backward
+            float scale = (cfg.dropout > 0.0f) ? (1.0f / (1.0f - cfg.dropout)) : 1.0f;
+            for (int i = 0; i < B * T * C; ++i) dl_fcproj[i] *= (mlp_mask[i] ? scale : 0.0f);
+
             matmul_backward(dl_fch_gelu, grads.fcprojw + l * C * 4 * C, grads.fcprojb + l * C,
                             dl_fcproj, l_fch_gelu, params.fcprojw + l * C * 4 * C, B, T, 4 * C, C);
             gelu_backward(dl_fch, l_fch, dl_fch_gelu, B * T * 4 * C);
@@ -256,6 +277,9 @@ public:
 
             // Reverse Residual 2 & Attention
             residual_backward(dresidual, dl_attproj, dl_residual2, B * T * C);
+            const uint8_t* att_mask = dropout_masks.data() + (1 + 2 * l) * B * T * C;
+            for (int i = 0; i < B * T * C; ++i) dl_attproj[i] *= (att_mask[i] ? scale : 0.0f);
+
             matmul_backward(dl_atty, grads.attprojw + l * C * C, grads.attprojb + l * C,
                             dl_attproj, l_atty, params.attprojw + l * C * C, B, T, C, C);
             attention_backward(dl_qkv, dl_preatt, dl_att, dl_atty, l_qkv, l_att, B, T, C, NH);
@@ -267,6 +291,10 @@ public:
         }
 
         // 3. Backward through Embeddings
+        const uint8_t* emb_mask = dropout_masks.data();
+        float scale = (cfg.dropout > 0.0f) ? (1.0f / (1.0f - cfg.dropout)) : 1.0f;
+        for (int i = 0; i < B * T * C; ++i) grads_acts.encoded[i] *= (emb_mask[i] ? scale : 0.0f);
+
         embedding_backward(grads.wte, grads.wpe, grads_acts.encoded, inputs, B, T, C);
     }
 

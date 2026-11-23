@@ -387,3 +387,46 @@ void crossentropy_softmax_backward(float* dlogits,
         }
     }
 }
+
+// Inverted Dropout Forward
+// mask: [N] uint8_t buffer (1 = kept, 0 = dropped) saved for backward pass
+void dropout_forward(float* out, uint8_t* mask, const float* inp,
+                     int N, float dropout_rate, bool training, std::mt19937& rng) {
+    if (!training || dropout_rate <= 0.0f) {
+        for (int i = 0; i < N; ++i) {
+            out[i] = inp[i];
+            if (mask != nullptr) mask[i] = 1;
+        }
+        return;
+    }
+
+    float scale = 1.0f / (1.0f - dropout_rate);
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    for (int i = 0; i < N; ++i) {
+        if (dist(rng) >= dropout_rate) {
+            mask[i] = 1;
+            out[i] = inp[i] * scale;
+        } else {
+            mask[i] = 0;
+            out[i] = 0.0f;
+        }
+    }
+}
+
+// Inverted Dropout Backward
+void dropout_backward(float* dinp, const uint8_t* mask, const float* dout,
+                      int N, float dropout_rate) {
+    if (dropout_rate <= 0.0f) {
+        for (int i = 0; i < N; ++i) dinp[i] += dout[i];
+        return;
+    }
+
+    float scale = 1.0f / (1.0f - dropout_rate);
+    for (int i = 0; i < N; ++i) {
+        if (mask[i]) {
+            dinp[i] += dout[i] * scale;
+        }
+    }
+}
+

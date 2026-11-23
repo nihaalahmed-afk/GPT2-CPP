@@ -11,6 +11,7 @@ struct GPT2Config {
     int n_layer    = 4;     // Number of Transformer blocks (L)
     int n_head     = 4;     // Number of attention heads (NH)
     int n_embd     = 256;   // Embedding dimension (C), head_size = C / NH = 64
+    float dropout = 0.1;
 };
 
 // Holds raw pointers into a single flat memory buffer
