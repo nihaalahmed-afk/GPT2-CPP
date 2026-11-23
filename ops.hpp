@@ -3,6 +3,74 @@
 #include <cstdint>
 
 
+// Embedding Forward: out[b, t, c] = wte[inputs[b, t], c] + wpe[t, c]
+void embedding_forward(float* out, const uint16_t* inputs,
+                       const float* wte, const float* wpe,
+                       int B, int T, int C) {
+    for (int b = 0; b < B; ++b) {
+        for (int t = 0; t < T; ++t) {
+            int tok = inputs[b * T + t];
+            const float* wte_row = wte + tok * C;
+            const float* wpe_row = wpe + t * C;
+            float* out_row = out + (b * T + t) * C;
+
+            for (int c = 0; c < C; ++c) {
+                out_row[c] = wte_row[c] + wpe_row[c];
+            }
+        }
+    }
+}
+
+// Embedding Backward
+void embedding_backward(float* dwte, float* dwpe, const float* dout,
+                        const uint16_t* inputs, int B, int T, int C) {
+    for (int b = 0; b < B; ++b) {
+        for (int t = 0; t < T; ++t) {
+            int tok = inputs[b * T + t];
+            float* dwte_row = dwte + tok * C;
+            float* dwpe_row = dwpe + t * C;
+            const float* dout_row = dout + (b * T + t) * C;
+
+            for (int c = 0; c < C; ++c) {
+                dwte_row[c] += dout_row[c];
+                dwpe_row[c] += dout_row[c];
+            }
+        }
+    }
+}
+
+// LayerNorm Forward
+void layernorm_forward(float* out, float* mean, float* rstd,
+                       const float* inp, const float* w, const float* b,
+                       int B, int T, int C) {
+    const float eps = 1e-5f;
+    for (int bt = 0; bt < B * T; ++bt) {
+        const float* x = inp + bt * C;
+        float* y = out + bt * C;
+
+        float m = 0.0f;
+        for (int c = 0; c < C; ++c) m += x[c];
+        m /= C;
+
+        float v = 0.0f;
+        for (int c = 0; c < C; ++c) {
+            float diff = x[c] - m;
+            v += diff * diff;
+        }
+        v /= C;
+        float s = 1.0f / std::sqrt(v + eps);
+
+        for (int c = 0; c < C; ++c) {
+            float norm = (x[c] - m) * s;
+            y[c] = norm * w[c] + b[c];
+        }
+
+        mean[bt] = m;
+        rstd[bt] = s;
+    }
+}
+
+
 // LayerNorm Backward
 void layernorm_backward(float* dinp, float* dw, float* db,
                         const float* dout, const float* inp, const float* w,
