@@ -4,3 +4,4 @@ gen
 generate
 test_loader
 train
+fast_train

@@ -1,6 +1,8 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <omp.h>
 
 
 // Embedding Forward: out[b, t, c] = wte[inputs[b, t], c] + wpe[t, c]
@@ -44,6 +46,7 @@ void layernorm_forward(float* out, float* mean, float* rstd,
                        const float* inp, const float* w, const float* b,
                        int B, int T, int C) {
     const float eps = 1e-5f;
+    #pragma omp parallel for
     for (int bt = 0; bt < B * T; ++bt) {
         const float* x = inp + bt * C;
         float* y = out + bt * C;
@@ -118,22 +121,22 @@ void layernorm_backward(float* dinp, float* dw, float* db,
 void matmul_forward(float* out, const float* inp, const float* weight, const float* bias,
                     int B, int T, int C_in, int C_out) {
     int BT = B * T;
+    #pragma omp parallel for collapse(2)
     for (int bt = 0; bt < BT; ++bt) {
-        const float* inp_row = inp + bt * C_in;
-        float* out_row = out + bt * C_out;
-
         for (int o = 0; o < C_out; ++o) {
+            const float* inp_row = inp + bt * C_in;
             const float* w_row = weight + o * C_in;
             float sum = (bias != nullptr) ? bias[o] : 0.0f;
 
-            // Contiguous inner dot product (SIMD friendly)
+            #pragma omp simd reduction(+:sum)
             for (int i = 0; i < C_in; ++i) {
                 sum += inp_row[i] * w_row[i];
             }
-            out_row[o] = sum;
+            out[bt * C_out + o] = sum;
         }
     }
 }
+
 
 
 // MatMul Backward
@@ -142,35 +145,49 @@ void matmul_backward(float* dinp, float* dweight, float* dbias,
                      int B, int T, int C_in, int C_out) {
     int BT = B * T;
 
-    // 1. Backward into input (dinp) and bias (dbias)
+    // 1a. Backward into input (dinp) — each bt owns dinp_row
+    #pragma omp parallel for
     for (int bt = 0; bt < BT; ++bt) {
         const float* dout_row = dout + bt * C_out;
         float* dinp_row = dinp + bt * C_in;
 
         for (int o = 0; o < C_out; ++o) {
             float d = dout_row[o];
-            if (dbias != nullptr) {
-                dbias[o] += d;
-            }
             const float* w_row = weight + o * C_in;
+            #pragma omp simd
             for (int i = 0; i < C_in; ++i) {
                 dinp_row[i] += d * w_row[i];
             }
         }
     }
 
-    // 2. Backward into weights (dweight)
+    // 1b. Backward into bias (dbias) — each o owns dbias[o]
+    if (dbias != nullptr) {
+        #pragma omp parallel for
+        for (int o = 0; o < C_out; ++o) {
+            float sum = 0.0f;
+            for (int bt = 0; bt < BT; ++bt) {
+                sum += dout[bt * C_out + o];
+            }
+            dbias[o] += sum;
+        }
+    }
+
+    // 2. Backward into weights (dweight) — each o owns dw_row
+    #pragma omp parallel for
     for (int o = 0; o < C_out; ++o) {
         float* dw_row = dweight + o * C_in;
         for (int bt = 0; bt < BT; ++bt) {
             float d = dout[bt * C_out + o];
             const float* inp_row = inp + bt * C_in;
+            #pragma omp simd
             for (int i = 0; i < C_in; ++i) {
                 dw_row[i] += d * inp_row[i];
             }
         }
     }
 }
+
 
 // Causal Multi-Head Self-Attention Forward
 // qkv:    [B, T, 3 * C] (input Queries, Keys, Values stacked)
@@ -183,7 +200,7 @@ void attention_forward(float* out, float* preatt, float* att,
     int C3 = C * 3;
     int hs = C / NH; // Head size (e.g., 256 / 4 = 64)
     float scale = 1.0f / std::sqrt(static_cast<float>(hs));
-
+    #pragma omp parallel for collapse(3)
     for (int b = 0; b < B; ++b) {
         for (int t = 0; t < T; ++t) {
             for (int h = 0; h < NH; ++h) {

@@ -339,7 +339,7 @@ public:
 
     // Autoregressive Text Generation (Temperature Sampling)
     std::vector<int> generate(const std::vector<int>& prompt_ids, int max_new_tokens,
-                              float temperature = 0.8f, uint32_t seed = 42) {
+                              float temperature = 0.7f, int top_k = 35, uint32_t seed = 42) {
         std::mt19937 rng(seed);
         std::vector<int> context = prompt_ids;
 
@@ -359,22 +359,51 @@ public:
             // Grab logits at the last time step (T_curr - 1)
             const float* last_logits = acts.logits + (T_curr - 1) * cfg.vocab_size;
 
-            // Apply temperature + Softmax
-            std::vector<float> probs(cfg.vocab_size);
+            // Greedy decoding shortcut if temperature <= 0
+            if (temperature <= 0.0f) {
+                int next_tok = static_cast<int>(
+                    std::max_element(last_logits, last_logits + cfg.vocab_size) - last_logits
+                );
+                context.push_back(next_tok);
+                if (next_tok == cfg.vocab_size - 1) break;
+                continue;
+            }
+
+            // 1. Scale logits by temperature
+            std::vector<float> scaled_logits(cfg.vocab_size);
+            for (int v = 0; v < cfg.vocab_size; ++v) {
+                scaled_logits[v] = last_logits[v] / temperature;
+            }
+
+            // 2. Top-K filtering: mask out tokens outside the top K logits
+            float threshold = -1e30f;
+            if (top_k > 0 && top_k < cfg.vocab_size) {
+                std::vector<float> temp = scaled_logits;
+                std::nth_element(temp.begin(),
+                                 temp.begin() + (cfg.vocab_size - top_k),
+                                 temp.end());
+                threshold = temp[cfg.vocab_size - top_k];
+            }
+
+            // 3. Numerically stable Softmax over kept tokens
             float max_l = -1e30f;
             for (int v = 0; v < cfg.vocab_size; ++v) {
-                float val = last_logits[v] / temperature;
-                if (val > max_l) max_l = val;
-                probs[v] = val;
+                if (scaled_logits[v] >= threshold && scaled_logits[v] > max_l) {
+                    max_l = scaled_logits[v];
+                }
             }
+
+            std::vector<float> probs(cfg.vocab_size, 0.0f);
             float sum = 0.0f;
             for (int v = 0; v < cfg.vocab_size; ++v) {
-                probs[v] = std::exp(probs[v] - max_l);
-                sum += probs[v];
+                if (scaled_logits[v] >= threshold) {
+                    probs[v] = std::exp(scaled_logits[v] - max_l);
+                    sum += probs[v];
+                }
             }
             for (int v = 0; v < cfg.vocab_size; ++v) probs[v] /= sum;
 
-            // Sample next token
+            // 4. Sample next token
             std::discrete_distribution<int> dist(probs.begin(), probs.end());
             int next_tok = dist(rng);
             context.push_back(next_tok);
@@ -384,4 +413,5 @@ public:
         }
         return context;
     }
+
 };
