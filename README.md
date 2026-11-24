@@ -69,7 +69,7 @@ The TinyShakespeare baseline run uses a lightweight, L3-cache-resident configura
 g++ -O3 -march=native -fopenmp train.cpp -o fast_train
 
 # Compile interactive inference runner
-g++ -O3 -march=native -fopenmp infer.cpp -o infer
+g++ -O3 -march=native -fopenmp generate.cpp -o generate
 ```
 
 ### 2. Train the Model
@@ -82,7 +82,7 @@ g++ -O3 -march=native -fopenmp infer.cpp -o infer
 
 ### 3. Run Interactive Inference
 ```bash
-./infer
+./generate
 ```
 
 ---
